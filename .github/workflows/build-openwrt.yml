@@ -298,14 +298,32 @@ jobs:
       if: success() && env.UPLOAD_FIRMWARE == 'true'
       run: |
         mkdir -p firmware
+
+        # Debug: Check if bin/targets exists
+        if [ ! -d "openwrt/bin/targets" ]; then
+          echo "❌ Error: openwrt/bin/targets directory not found"
+          echo "Contents of openwrt/bin:"
+          ls -la openwrt/bin/ || echo "No bin directory"
+          exit 1
+        fi
+
+        echo "openwrt/bin/targets contents:"
+        find openwrt/bin/targets -type f | head -20
+
         # Copy firmware files
         find openwrt/bin/targets -type f \( -name "*sysupgrade*" -o -name "*combined*efi*" \) -exec cp {} firmware/ \; 2>/dev/null || true
 
         # Verify firmware files exist
-        if [ -z "$(ls -A firmware/*.bin 2>/dev/null)$(ls -A firmware/*.squashfs* 2>/dev/null)" ]; then
-          echo "❌ Error: No firmware files found in openwrt/bin/targets"
+        FIRMWARE_COUNT=$(find firmware -type f \( -name "*.bin" -o -name "*.squashfs*" \) | wc -l)
+
+        if [ $FIRMWARE_COUNT -eq 0 ]; then
+          echo "❌ Error: No firmware files found"
+          echo "Files copied to firmware directory:"
+          ls -la firmware/ || echo "Firmware directory is empty"
           exit 1
         fi
+
+        echo "✓ Found $FIRMWARE_COUNT firmware file(s)"
 
         # Save configs
         cp openwrt/.config firmware/build.config 2>/dev/null || true
