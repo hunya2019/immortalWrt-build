@@ -1,43 +1,85 @@
 # Auto-generated GitHub Actions workflow for building OpenWrt
-# Inspired by https://github.com/kenzok8/openwrt_Build
+# Reference: https://github.com/kenzok8/openwrt_Build
 
 name: OpenWrt Build
 
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: 'Select build target'
+        required: true
+        default: 'nanopi-r3s'
+        type: choice
+        options:
+        - immortalwrt-x86_64
+        - nanopi-r3s
+
       openwrt_repo:
-        description: 'OpenWrt source repository URL'
+        description: 'OpenWrt source repository'
         required: false
-        default: 'https://github.com/immortalwrt/immortalwrt'
+        default: 'immortalwrt (official)'
+        type: choice
+        options:
+        - immortalwrt (official)
+        - lean
+        - lienol
       openwrt_branch:
         description: 'OpenWrt source branch'
         required: false
         default: 'openwrt-25.12'
+        type: choice
+        options:
+        - openwrt-25.12
+        - openwrt-24.10
+        - openwrt-23.05
+        - master
       config_path:
-        description: 'Optional path to a .config (relative to repo root)'
+        description: 'Use custom .config file'
         required: false
-        default: ''
+        default: 'none'
+        type: choice
+        options:
+        - none
+        - .config
+        - nanopi-r3s.config
       ssh:
-        description: 'Enable SSH connection for interactive menuconfig (true/false)'
+        description: 'Enable SSH for menuconfig'
         required: false
         default: 'false'
+        type: choice
+        options:
+        - 'false'
+        - 'true'
   push:
     branches:
     - main
 
 env:
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
   build:
-    name: Build OpenWrt
+    name: Build ${{ github.event.inputs.target || 'OpenWrt' }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout this repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+
+    - name: Free disk space
+      uses: coder-xiaomo/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
     - name: Install build dependencies
       run: |
@@ -48,22 +90,42 @@ jobs:
           python3 python3-setuptools rsync swig unzip file wget \
           ccache libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev \
           libpython3-dev libncurses5-dev python3-pyelftools \
-          python3-distutils ca-certificates
+          ca-certificates aria2 jq
+
+    - name: Get current date
+      id: date
+      run: |
+        echo "date=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+        echo "date2=$(date +'%m/%d %Y')" >> $GITHUB_ENV
+        echo "date3=$(date +'%m.%d')" >> $GITHUB_ENV
 
     - name: Clone OpenWrt source
       run: |
-        git clone --depth 1 --branch "${{ github.event.inputs.openwrt_branch || env.openwrt_branch }}" \
-          "${{ github.event.inputs.openwrt_repo || env.openwrt_repo }}" openwrt
+        # Map repository choice to URL
+        case "${{ github.event.inputs.openwrt_repo }}" in
+          "immortalwrt (official)")
+            REPO_URL="https://github.com/immortalwrt/immortalwrt"
+            ;;
+          "lean")
+            REPO_URL="https://github.com/coolsnowwolf/lede"
+            ;;
+          "lienol")
+            REPO_URL="https://github.com/Lienol/openwrt"
+            ;;
+          *)
+            REPO_URL="https://github.com/immortalwrt/immortalwrt"
+            ;;
+        esac
 
-    - name: Cache OpenWrt downloads
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/dl
-          openwrt/build_dir
-        key: ${{ runner.os }}-openwrt-cache-${{ github.event.inputs.openwrt_branch || env.openwrt_branch }}-${{ hashFiles('**/feeds.conf*', '**/*.config') }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-cache-${{ github.event.inputs.openwrt_branch || env.openwrt_branch }}-
+        git clone --depth 1 --branch "${{ github.event.inputs.openwrt_branch }}" \
+          "$REPO_URL" openwrt
+
+    - name: Free up disk space
+      run: |
+        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/staging_dir /mnt/openwrt/build_dir
+        ln -sf /mnt/openwrt/dl openwrt/dl
+        ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
+        ln -sf /mnt/openwrt/build_dir openwrt/build_dir
 
     - name: Update feeds
       working-directory: openwrt
@@ -80,13 +142,25 @@ jobs:
         ./scripts/feeds install -a
 
     - name: Prepare .config
-      working-directory: openwrt
       run: |
-        if [ -n "${{ github.event.inputs.config_path }}" ]; then
-          cp "${{ github.workspace }}/${{ github.event.inputs.config_path }}" .config
+        # Priority: target-specific config > workflow choice > repo .config > defconfig
+        CONFIG_FILE="${{ github.event.inputs.config_path }}"
+
+        if [ "$CONFIG_FILE" != "none" ] && [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+          cp "$CONFIG_FILE" openwrt/.config
+        elif [ -f "${{ github.event.inputs.target }}.config" ]; then
+          cp "${{ github.event.inputs.target }}.config" openwrt/.config
+        elif [ -f ".config" ]; then
+          cp ".config" openwrt/.config
+        else
+          cd openwrt && make defconfig
         fi
-        if [ ! -f .config ]; then
-          make defconfig
+
+    - name: Run customize script
+      run: |
+        if [ -x "./customize.sh" ]; then
+          chmod +x ./customize.sh
+          ./customize.sh
         fi
 
     - name: Setup SSH for menuconfig (optional)
@@ -95,58 +169,104 @@ jobs:
       with:
         limit-access-to-actor: true
 
-    - name: Compile OpenWrt
+    - name: Download packages
       working-directory: openwrt
       run: |
-        MAKEFLAGS="-j$(nproc)" make V=s
+        make download -j$(nproc)
+        find dl -size -1024c -exec rm -f {} \;
 
-    - name: Organize firmware files
-      if: success()
+    - name: Cache OpenWrt build
+      uses: klever1988/cachewrtbuild@main
+      with:
+        ccache: 'true'
+        prefix: ${{ github.workspace }}/openwrt
+
+    - name: Compile the firmware
+      working-directory: openwrt
+      run: |
+        echo -e "$(($(nproc)+1)) thread compile"
+        make -j$(($(nproc)+1)) || make -j1 V=s
+
+    - name: Check space usage
+      if: always()
+      run: df -hT
+
+    - name: Organize files
+      id: organize
+      if: success() && env.UPLOAD_FIRMWARE == 'true'
       run: |
         mkdir -p firmware
-        # Copy firmware files (pick sysupgrade/combined images)
+        # Copy firmware files
         find openwrt/bin/targets -type f \( -name "*sysupgrade*" -o -name "*combined*efi*" \) -exec cp {} firmware/ \; 2>/dev/null || true
 
-        # Save the .config file for next build
-        cp openwrt/.config firmware/build.config
+        # Verify firmware files exist
+        if [ -z "$(ls -A firmware/*.bin 2>/dev/null)$(ls -A firmware/*.squashfs* 2>/dev/null)" ]; then
+          echo "❌ Error: No firmware files found in openwrt/bin/targets"
+          exit 1
+        fi
 
-        # Create version info
-        echo "Build date: $(date +'%Y-%m-%d %H:%M:%S')" > firmware/BUILD_INFO.txt
-        echo "OpenWrt branch: ${{ github.event.inputs.openwrt_branch }}" >> firmware/BUILD_INFO.txt
-        echo "Commit: $(git -C openwrt rev-parse --short HEAD 2>/dev/null || echo 'N/A')" >> firmware/BUILD_INFO.txt
+        # Save configs
+        cp openwrt/.config firmware/build.config 2>/dev/null || true
+        cp openwrt/build_dir/target-*/linux-*/linux-*/.config firmware/kernel.config 2>/dev/null || true
+
+        # Generate version info
+        cd firmware
+        echo "v${{ env.date2 }}" > version.txt
+        md5_output=$( (md5sum *sysupgrade* 2>/dev/null || md5sum *combined-efi* 2>/dev/null) | awk '{print $1}' ) || true
+        echo "$md5_output" >> version.txt
+        echo "OpenWrt-${{ github.event.inputs.openwrt_branch || 'default' }}" >> version.txt
+
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
-      if: success()
+      if: steps.organize.outputs.status == 'success'
       with:
-        name: openwrt-firmware-${{ github.run_id }}
+        name: openwrt-${{ github.event.inputs.target }}-${{ env.date3 }}
         path: firmware
         retention-days: 30
 
     - name: Create Release and upload firmware
-      if: success()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: build-${{ github.run_number }}-${{ github.run_id }}
-        name: 'OpenWrt Build #${{ github.run_number }}'
+        tag_name: build-${{ env.date }}-${{ github.event.inputs.target }}
+        name: 'OpenWrt ${{ github.event.inputs.target }} - ${{ env.date2 }}'
+        draft: false
+        prerelease: false
         body: |
           ## Build Information
-          - **Build Date**: ${{ github.event.inputs.openwrt_branch }}
-          - **Branch**: ${{ github.event.inputs.openwrt_branch }}
+          - **Build Target**: ${{ github.event.inputs.target }}
+          - **Build Date**: ${{ env.date2 }}
+          - **Branch**: ${{ github.event.inputs.openwrt_branch || 'default' }}
           - **Commit**: ${{ github.sha }}
 
           ## Included Files
           - Firmware images (sysupgrade/combined)
-          - `build.config` - Use this as `.config` for next build
-          - `BUILD_INFO.txt` - Build details
+          - `build.config` - Configuration file for next build
+          - `kernel.config` - Linux kernel configuration
+          - `version.txt` - Build metadata and MD5 hash
 
-          ## How to Use Config
-          ```bash
-          # Download build.config
-          wget https://github.com/${{ github.repository }}/releases/download/build-${{ github.run_number }}-${{ github.run_id }}/build.config -O .config
-          # Use it for next build
-          ```
-        files: |
-          firmware/*
+          ## How to Reuse Configuration
+          1. Download `build.config` from this release
+          2. Save as `.config` in your repository
+          3. Trigger workflow with this `.config` file
+        files: firmware/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 7
+        keep_minimum_runs: 3
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: success() && env.UPLOAD_RELEASE == 'true'
+      with:
+        keep_latest: 10
+        delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
