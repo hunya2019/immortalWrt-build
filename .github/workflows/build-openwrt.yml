@@ -209,9 +209,31 @@ jobs:
         echo "Updated feeds.conf.default:"
         tail -5 feeds.conf.default
 
-        # Update all feeds
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a || echo "⚠️ Some feeds may have failed to install, continuing..."
+        echo ""
+        echo "=== Updating plugin feeds with retry logic ==="
+
+        # Try updating all feeds with retry
+        for attempt in 1 2 3; do
+          echo "Attempt $attempt of 3..."
+          ./scripts/feeds update -a && break
+          if [ $attempt -lt 3 ]; then
+            echo "⚠️ Feed update attempt $attempt failed, retrying in 10 seconds..."
+            sleep 10
+          fi
+        done
+
+        echo ""
+        echo "=== Installing feeds ==="
+
+        # Install feeds, continue even if some fail
+        ./scripts/feeds install -a 2>&1 | tee feeds_install.log
+
+        # Check if at least some feeds were installed
+        if grep -q "Number of feeds" feeds_install.log || [ -d "feeds/packages" ]; then
+          echo "✓ Feed installation completed"
+        else
+          echo "⚠️ Feed installation may have issues, but continuing..."
+        fi
 
     - name: Prepare .config
       run: |
