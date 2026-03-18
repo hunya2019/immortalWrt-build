@@ -20,6 +20,17 @@ if [ -f "feeds.conf.default" ]; then
     # 备份原始配置
     cp feeds.conf.default feeds.conf.default.bak
     echo "✓ Feeds配置已备份"
+    
+    # 添加自定义feeds源（避免重复）
+    if ! grep -q "smpackage" feeds.conf.default; then
+        echo "src-git smpackage https://github.com/kenzok8/small-package.git" >> feeds.conf.default
+        echo "✓ 已添加 smpackage 源"
+    fi
+    
+    if ! grep -q "openwrt_packages" feeds.conf.default; then
+        echo "src-git openwrt_packages https://github.com/kenzok8/openwrt-packages.git" >> feeds.conf.default
+        echo "✓ 已添加 openwrt_packages 源"
+    fi
 else
     echo "警告: feeds.conf.default文件不存在"
 fi
@@ -47,23 +58,44 @@ fi
 # ===== 添加自定义软件包 =====
 echo "检查是否需要添加自定义软件包..."
 
+# 定义克隆函数，支持重试
+clone_repo() {
+    local repo_url=$1
+    local target_path=$2
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if [ -d "$target_path" ]; then
+            echo "  ✓ $target_path 已存在"
+            return 0
+        fi
+        
+        echo "  尝试克隆 ($attempt/$max_attempts): $repo_url"
+        if git clone --depth 1 "$repo_url" "$target_path" 2>/dev/null; then
+            echo "  ✓ 成功克隆: $target_path"
+            return 0
+        else
+            echo "  ✗ 克隆失败 (尝试 $attempt/$max_attempts)"
+            attempt=$((attempt + 1))
+            if [ $attempt -le $max_attempts ]; then
+                sleep 5
+            fi
+        fi
+    done
+    
+    echo "  ⚠️ 克隆失败: $target_path"
+    return 1
+}
+
 # 克隆PassWall2 - 代理工具
-if [ ! -d "package/passwall2" ]; then
-    echo "克隆 PassWall2..."
-    git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall2.git package/passwall2 2>/dev/null || echo "ℹ PassWall2克隆失败或已存在"
-fi
+clone_repo "https://github.com/xiaorouji/openwrt-passwall2.git" "package/passwall2"
 
 # 添加 iStore - 应用商店
-if [ ! -d "package/istore" ]; then
-    echo "克隆 iStore..."
-    git clone --depth 1 https://github.com/linkease/istore.git package/istore 2>/dev/null || echo "ℹ iStore克隆失败或已存在"
-fi
+clone_repo "https://github.com/linkease/istore.git" "package/istore"
 
 # 添加 AdGuardHome 插件
-if [ ! -d "package/luci-app-adguardhome" ]; then
-    echo "克隆 AdGuardHome..."
-    git clone --depth 1 https://github.com/rufengsuixing/luci-app-adguardhome.git package/luci-app-adguardhome 2>/dev/null || echo "ℹ AdGuardHome克隆失败或已存在"
-fi
+clone_repo "https://github.com/rufengsuixing/luci-app-adguardhome.git" "package/luci-app-adguardhome"
 
 echo "✓ 自定义软件包检查完成"
 
