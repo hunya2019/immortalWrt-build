@@ -198,7 +198,7 @@ jobs:
       run: |
         # Add small-package (kenzok8)
         if ! grep -q "smpackage" feeds.conf.default; then
-          echo "src-git smpackage https://github.com/kenzok8/small-package.git" >> feeds.conf.default
+          echo "src-git smpackage https://github.com/kenzok8/small.git" >> feeds.conf.default
         fi
 
         # Add openwrt-packages (kenzok8)
