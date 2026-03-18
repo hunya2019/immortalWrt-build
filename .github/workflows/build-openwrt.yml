@@ -25,7 +25,7 @@ on:
         - lean
         - lienol
       openwrt_branch:
-        description: 'OpenWrt source branch'
+        description: 'OpenWrt source branch (auto-adjusted by repo)'
         required: false
         default: 'openwrt-25.12'
         type: choice
@@ -34,6 +34,8 @@ on:
         - openwrt-24.10
         - openwrt-23.05
         - master
+        - snapshot
+        - main
       config_path:
         description: 'Use custom .config file'
         required: false
@@ -101,24 +103,64 @@ jobs:
 
     - name: Clone OpenWrt source
       run: |
-        # Map repository choice to URL
+        # Map repository choice to URL and validate branch
         case "${{ github.event.inputs.openwrt_repo }}" in
           "immortalwrt (official)")
             REPO_URL="https://github.com/immortalwrt/immortalwrt"
+            # Valid branches for immortalwrt: openwrt-25.12, openwrt-24.10, openwrt-23.05, master
+            VALID_BRANCHES=("openwrt-25.12" "openwrt-24.10" "openwrt-23.05" "master")
+            DEFAULT_BRANCH="openwrt-25.12"
             ;;
           "lean")
             REPO_URL="https://github.com/coolsnowwolf/lede"
+            # Valid branches for Lean: master, snapshot
+            VALID_BRANCHES=("master" "snapshot")
+            DEFAULT_BRANCH="master"
             ;;
           "lienol")
             REPO_URL="https://github.com/Lienol/openwrt"
+            # Valid branches for Lienol: main, master, 22.03, 21.02
+            VALID_BRANCHES=("main" "master" "22.03" "21.02")
+            DEFAULT_BRANCH="main"
             ;;
           *)
             REPO_URL="https://github.com/immortalwrt/immortalwrt"
+            VALID_BRANCHES=("openwrt-25.12" "openwrt-24.10" "openwrt-23.05" "master")
+            DEFAULT_BRANCH="openwrt-25.12"
             ;;
         esac
 
-        git clone --depth 1 --branch "${{ github.event.inputs.openwrt_branch }}" \
+        # Get selected branch
+        SELECTED_BRANCH="${{ github.event.inputs.openwrt_branch }}"
+
+        # Check if selected branch is valid for this repo
+        BRANCH_VALID=0
+        for branch in "${VALID_BRANCHES[@]}"; do
+          if [ "$SELECTED_BRANCH" = "$branch" ]; then
+            BRANCH_VALID=1
+            break
+          fi
+        done
+
+        # Use default branch if selected branch is not valid
+        if [ $BRANCH_VALID -eq 0 ]; then
+          echo "⚠️ Branch '$SELECTED_BRANCH' not valid for this repository"
+          echo "Using default branch: $DEFAULT_BRANCH"
+          FINAL_BRANCH=$DEFAULT_BRANCH
+        else
+          echo "✓ Using selected branch: $SELECTED_BRANCH"
+          FINAL_BRANCH=$SELECTED_BRANCH
+        fi
+
+        echo "Repository: $REPO_URL"
+        echo "Branch: $FINAL_BRANCH"
+
+        # Clone with selected branch
+        git clone --depth 1 --branch "$FINAL_BRANCH" \
           "$REPO_URL" openwrt
+
+        # Save branch info for later use
+        echo "OPENWRT_BRANCH=$FINAL_BRANCH" >> $GITHUB_ENV
 
     - name: Free up disk space
       run: |
@@ -126,6 +168,14 @@ jobs:
         ln -sf /mnt/openwrt/dl openwrt/dl
         ln -sf /mnt/openwrt/staging_dir openwrt/staging_dir
         ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+
+    - name: Run DIY1 script (before feeds update)
+      working-directory: openwrt
+      run: |
+        if [ -f "../diy1.sh" ]; then
+          chmod +x ../diy1.sh
+          ../diy1.sh
+        fi
 
     - name: Update feeds
       working-directory: openwrt
@@ -161,6 +211,14 @@ jobs:
         if [ -x "./customize.sh" ]; then
           chmod +x ./customize.sh
           ./customize.sh
+        fi
+
+    - name: Run DIY2 script (after config load, before compile)
+      working-directory: openwrt
+      run: |
+        if [ -f "../diy2.sh" ]; then
+          chmod +x ../diy2.sh
+          ../diy2.sh
         fi
 
     - name: Setup SSH for menuconfig (optional)
@@ -214,7 +272,7 @@ jobs:
         echo "v${{ env.date2 }}" > version.txt
         md5_output=$( (md5sum *sysupgrade* 2>/dev/null || md5sum *combined-efi* 2>/dev/null) | awk '{print $1}' ) || true
         echo "$md5_output" >> version.txt
-        echo "OpenWrt-${{ github.event.inputs.openwrt_branch || 'default' }}" >> version.txt
+        echo "OpenWrt-${{ env.OPENWRT_BRANCH }}" >> version.txt
 
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
@@ -239,7 +297,8 @@ jobs:
           ## Build Information
           - **Build Target**: ${{ github.event.inputs.target }}
           - **Build Date**: ${{ env.date2 }}
-          - **Branch**: ${{ github.event.inputs.openwrt_branch || 'default' }}
+          - **Repository**: ${{ github.event.inputs.openwrt_repo }}
+          - **Branch**: ${{ env.OPENWRT_BRANCH }}
           - **Commit**: ${{ github.sha }}
 
           ## Included Files

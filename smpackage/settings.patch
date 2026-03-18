@@ -1,0 +1,120 @@
+# === 自定义设置开始 ===
+
+echo "开始应用自定义设置..."
+
+# 定义默认值
+root_password="password"
+lan_ip_address="192.168.8.1"
+lan_netmask="255.255.252.0"
+dhcp_limit="800"
+# wlan_name="ImmortalWrt"
+# wlan_password="12345678"
+
+# root 密码（仅在默认还是空密码时才设置）
+if passwd -S root 2>/dev/null | grep -q "NP"; then
+  echo "设置 root 密码"
+  (echo "$root_password"; sleep 1; echo "$root_password") | passwd root >/dev/null 2>&1
+fi
+
+# LAN IP（如果已有配置就不动）
+if [ -n "$lan_ip_address" ] && [ "$(uci -q get network.lan.ipaddr)" != "$lan_ip_address" ]; then
+  echo "设置 LAN IP 为 $lan_ip_address"
+  uci set network.lan.ipaddr="$lan_ip_address"
+fi
+
+# LAN netmask（如果已有配置就不动）
+if [ -n "$lan_netmask" ] && [ "$(uci -q get network.lan.netmask)" != "$lan_netmask" ]; then
+  echo "设置 LAN netmask 为 $lan_netmask"
+  uci set network.lan.netmask="$lan_netmask"
+fi
+
+# DHCP 租约上限（如果已有配置就不动）
+if [ -n "$dhcp_limit" ] && [ "$(uci -q get dhcp.lan.limit)" != "$dhcp_limit" ]; then
+  echo "设置 DHCP 最大租约数为 $dhcp_limit"
+  uci set dhcp.lan.limit="$dhcp_limit"
+fi
+
+# DHCP 租期（只在未配置时设置）
+uci -q get dhcp.lan.leasetime >/dev/null || uci set dhcp.lan.leasetime='2m'
+
+# WiFi（仅在无线未启用时才配置）
+if [ -n "$wlan_name" ] && [ -n "$wlan_password" ] && [ ${#wlan_password} -ge 8 ]; then
+  if [ "$(uci -q get wireless.@wifi-device[0].disabled)" = "1" ]; then
+    echo "启用并配置 WiFi"
+    uci set wireless.@wifi-device[0].disabled='0'
+    uci set wireless.@wifi-iface[0].disabled='0'
+    uci set wireless.@wifi-iface[0].encryption='psk2'
+    uci set wireless.@wifi-iface[0].ssid="$wlan_name"
+    uci set wireless.@wifi-iface[0].key="$wlan_password"
+  fi
+fi
+
+# 系统设置（如果主机名未修改才设置）
+if [ "$(uci -q get system.@system[0].hostname)" = "OpenWrt" ]; then
+  uci set system.@system[0].hostname='ImmortalWrt'
+fi
+
+# 基本网络设置（只在未配置时设置）
+uci -q get network.lan.delegate >/dev/null || uci set network.lan.delegate='0'
+uci -q get network.lan.ip6assign >/dev/null || uci set network.lan.ip6assign='64'
+uci -q get network.lan.ip6ifaceid >/dev/null || uci set network.lan.ip6ifaceid='eui64'
+
+# DHCP 高级设置（只在未配置时设置）
+uci -q get dhcp.lan.ra >/dev/null || uci set dhcp.lan.ra='server'
+uci -q get dhcp.lan.ra_flags >/dev/null || uci add_list dhcp.lan.ra_flags='none'
+uci -q get dhcp.lan.dns_service >/dev/null || uci set dhcp.lan.dns_service='0'
+
+# Host 绑定（先检查是否已存在该 MAC）
+add_static_host() {
+  local name="$1" ip="$2" mac="$3"
+  if ! uci show dhcp | grep -q "$mac"; then
+    echo "新增静态租约 $name $ip $mac"
+    uci add dhcp host
+    uci set dhcp.@host[-1].name="$name"
+    uci set dhcp.@host[-1].ip="$ip"
+    uci add_list dhcp.@host[-1].mac="$mac"
+  fi
+}
+
+# 添加静态地址绑定
+add_static_host "DESKTOP-DR6M5VG" "192.168.10.107" "30:9C:23:E1:E3:72"
+add_static_host "armbian" "192.168.10.158" "6A:CE:3B:D4:CB:8B"
+add_static_host "WIN-LMSJ088AVIQ" "192.168.10.180" "7C:2B:E1:13:6E:83"
+
+# zerotier 设置（如果安装了才配置）
+if opkg list-installed | grep -q "^zerotier"; then
+  # 删除现有配置
+  uci -q del zerotier.earth.enabled
+  uci -q del zerotier.earth.allow_managed
+  uci -q del zerotier.earth.allow_global
+  uci -q del zerotier.earth.allow_default
+  uci -q del zerotier.earth.allow_dns
+  uci -q del zerotier.earth.fw_allow_input
+  uci -q del zerotier.earth.fw_allow_forward
+  uci -q del zerotier.earth.fw_allow_masq
+  uci -q del zerotier.global.enabled
+
+  # 设置新配置
+  uci set zerotier.earth.id='d3ecf5726da3eeac'
+  uci set zerotier.earth.allow_global='1'
+  uci set zerotier.earth.allow_default='1'
+  uci set zerotier.earth.allow_dns='1'
+  uci set zerotier.earth.fw_allow_input='1'
+  uci set zerotier.earth.fw_allow_forward='1'
+  uci set zerotier.earth.fw_allow_masq='1'
+  uci set zerotier.global.enabled='1'
+fi
+
+# vlmcsd 设置（如果安装了才配置）
+if opkg list-installed | grep -q "^vlmcsd"; then
+  uci -q get vlmcsd.config.enabled >/dev/null || uci set vlmcsd.config.enabled='1'
+  uci -q get vlmcsd.config.auto_activate >/dev/null || uci set vlmcsd.config.auto_activate='1'
+  uci -q get vlmcsd.config.internet_access >/dev/null || uci set vlmcsd.config.internet_access='1'
+fi
+
+
+# 提交更改
+uci commit
+
+echo "自定义设置应用完成"
+# === 自定义设置结束 ===
